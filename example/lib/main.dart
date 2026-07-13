@@ -46,6 +46,7 @@ class _TaskListPageState extends State<TaskListPage> {
   ];
 
   int _nextId = 0;
+  int _nextTagId = 0;
   late List<Task> _tasks = [for (var i = 0; i < 4; i++) _makeTask(_titles[i])];
   List<String> _tags = ['physics', 'reorder', 'implicit'];
 
@@ -148,8 +149,10 @@ class _TaskListPageState extends State<TaskListPage> {
 
   void _addTag() {
     const pool = ['spring', 'masonry', 'ticker', 'render', 'diff', 'lift'];
-    final tag = pool[_tags.length % pool.length];
-    setState(() => _tags = [..._tags, '$tag${_tags.length}']);
+    // A monotonic id keeps tags unique even after add/delete/add — the tag
+    // string is the item identity (idOf), so duplicates would collide.
+    final n = _nextTagId++;
+    setState(() => _tags = [..._tags, '${pool[n % pool.length]}$n']);
   }
 
   @override

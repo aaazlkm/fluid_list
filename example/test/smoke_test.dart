@@ -23,7 +23,7 @@ void main() {
     await tester.tap(find.byIcon(Icons.close).first);
     await tester.pumpAndSettle();
 
-    // Switch to handle mode and back — the list rebuilds cleanly.
+    // Switch to handle mode — the list rebuilds cleanly and shows handles.
     await tester.tap(find.byTooltip('Drag: whole item'));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.drag_indicator), findsWidgets);
