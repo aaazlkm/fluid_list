@@ -108,7 +108,13 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
   DragSession<T>? _drag;
   MultiDragGestureRecognizer? _dragRecognizer;
-  int? _dragRecognizerPointer;
+
+  /// The most recent pointer-down we armed a recognizer for. Held only to reject
+  /// the second of the two listeners that see the *same* down event (the
+  /// handle's inner one and the body's outer one) — compared by identity, so a
+  /// later down that happens to reuse a pointer id (mouse, tests) is never
+  /// blocked.
+  PointerDownEvent? _lastHandledDown;
 
   EdgeDraggingAutoScroller? _autoScroller;
   ScrollableState? _scrollable;
@@ -329,7 +335,10 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
     _renderBox?.markNeedsPaint();
 
-    if (drag != null && drag.phase == DragPhase.settling && !_animator.isSettling) {
+    // Wait for the lift to fall back to 0 too, not just the position spring —
+    // a drop into the same slot has nothing to settle positionally, but the
+    // lift (and the liftedBuilder decoration) must still animate 1 → 0.
+    if (drag != null && drag.phase == DragPhase.settling && !_animator.isSettling && !_animator.lift.isAnimating) {
       _finishSettle();
       return;
     }
@@ -391,14 +400,17 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   void _startDragRecognition(Object id, PointerDownEvent event, Duration delay) {
     if (!_reorderEnabled || event.buttons != kPrimaryButton) return;
     if (_drag != null) return;
-    if (_dragRecognizer != null && _dragRecognizerPointer == event.pointer) return;
+    // The same down reaches both the handle's inner listener and the body's
+    // outer one; the deeper (handle) call fires first and wins, so ignore the
+    // second call for the same event.
+    if (identical(event, _lastHandledDown)) return;
+    _lastHandledDown = event;
 
     _dragRecognizer?.dispose();
     _dragRecognizer = (delay == Duration.zero ? ImmediateMultiDragGestureRecognizer(debugOwner: this) : DelayedMultiDragGestureRecognizer(delay: delay, debugOwner: this))
       ..gestureSettings = MediaQuery.maybeGestureSettingsOf(context)
       ..onStart = ((position) => _onDragStart(id, position))
       ..addPointer(event);
-    _dragRecognizerPointer = event.pointer;
   }
 
   Drag? _onDragStart(Object id, Offset globalPosition) {
@@ -610,7 +622,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
       delegate: SliverChildBuilderDelegate(
         _buildChild,
         childCount: _composite.length,
-        findChildIndexCallback: (key) => _indexByKeyValue[(key as ValueKey).value as (String, Object)],
+        findChildIndexCallback: (key) => key is ValueKey && key.value is (String, Object) ? _indexByKeyValue[key.value as (String, Object)] : null,
         addAutomaticKeepAlives: false,
         addRepaintBoundaries: false,
         addSemanticIndexes: false,
