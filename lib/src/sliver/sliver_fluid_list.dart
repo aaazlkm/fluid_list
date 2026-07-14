@@ -110,11 +110,13 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   MultiDragGestureRecognizer? _dragRecognizer;
 
   /// The most recent pointer-down we armed a recognizer for. Held only to reject
-  /// the second of the two listeners that see the *same* down event (the
-  /// handle's inner one and the body's outer one) — compared by identity, so a
-  /// later down that happens to reuse a pointer id (mouse, tests) is never
+  /// the second of the two listeners that see the *same* physical press (the
+  /// handle's inner one and the body's outer one). Compared by the untransformed
+  /// [PointerEvent.original], since nested listeners at different transforms
+  /// receive distinct transformed copies of the one press; a later, genuinely
+  /// separate down (even one reusing a pointer id — mouse, tests) is never
   /// blocked.
-  PointerDownEvent? _lastHandledDown;
+  PointerEvent? _lastHandledDown;
 
   EdgeDraggingAutoScroller? _autoScroller;
   ScrollableState? _scrollable;
@@ -134,6 +136,11 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   /// from a child's key value to its composite index for delegate reconciliation.
   List<_CompositeEntry> _composite = const [];
   Map<(String, Object), int> _indexByKeyValue = const {};
+
+  /// id → position in the base order (all items minus the dragged one), memoized
+  /// so the per-tick [_applyPointer] avoids rebuilding and scanning the whole
+  /// order each frame. Invalidated whenever the items or the dragged id change.
+  Map<Object, int>? _baseIndexCache;
 
   RenderSliverFluidList? get _renderBox => _bodyKey.currentContext?.findRenderObject() as RenderSliverFluidList?;
 
@@ -164,6 +171,10 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   double _scalarOf(FluidListReorder<T>? reorder) => reorder is FluidListReorderEnabled<T> ? reorder.autoScrollVelocityScalar : kFluidListDefaultAutoScrollVelocityScalar;
 
   void _rebuildAutoScroller() {
+    // Stop the outgoing scroller first: otherwise a scrollable/velocity change
+    // mid-drag leaves its loop running while later stopAutoScroll calls only
+    // reach the replacement.
+    _autoScroller?.stopAutoScroll();
     final scrollable = _scrollable;
     _autoScroller = scrollable == null
         ? null
@@ -187,7 +198,8 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     // Balance an onReorderStarted a listener saw: if we're torn down mid-drag,
     // report the cancel. (Only for an active drag — a settling one already
     // reported onReorderFinished.)
-    if (_drag?.isActive ?? false) _reorder?.onReorderCanceled?.call(_drag!.item);
+    if (_drag?.isActive ?? false) _drag!.onCanceled?.call(_drag!.item);
+    _autoScroller?.stopAutoScroll();
     _dragRecognizer?.dispose();
     _ticker.dispose();
     super.dispose();
@@ -209,6 +221,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     final previousOrder = _lastOrder;
     _indexItems();
     _lastOrder = [for (final item in widget.items) widget.idOf(item)];
+    _baseIndexCache = null;
 
     final box = _renderBox;
     for (var i = 0; i < previousOrder.length; i++) {
@@ -258,9 +271,9 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
         // fire a cancel after a finish for the same gesture.
         if (!_reorderEnabled || !_itemsById.containsKey(drag.id)) _finishSettle();
       } else if (!_reorderEnabled) {
-        // Reordering was disabled mid-drag: stop it (the config carries no
-        // callbacks now, so nothing to notify).
-        _abortDrag(notify: false);
+        // Reordering was disabled mid-drag: stop it, balancing the started
+        // gesture with a cancel from the callback captured at lift.
+        _abortDrag(notify: true);
       } else if (!_itemsById.containsKey(drag.id)) {
         _abortDrag(notify: true);
       } else {
@@ -286,6 +299,23 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     for (final item in widget.items)
       if (widget.idOf(item) != _drag?.id) widget.idOf(item),
   ];
+
+  /// A memoized id → base-order index map (the same ordering as [_baseOrder]),
+  /// so per-tick lookups during a drag are O(1) instead of an O(n) rebuild and
+  /// scan. Invalidate [_baseIndexCache] whenever the items or dragged id change.
+  Map<Object, int> _baseIndex() {
+    final cached = _baseIndexCache;
+    if (cached != null) return cached;
+    final map = <Object, int>{};
+    final draggedId = _drag?.id;
+    var index = 0;
+    for (final item in widget.items) {
+      final id = widget.idOf(item);
+      if (id == draggedId) continue;
+      map[id] = index++;
+    }
+    return _baseIndexCache = map;
+  }
 
   /// Live ids with the dragged item spliced into its current hypothesis.
   List<Object> _displayOrder() {
@@ -415,9 +445,11 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     if (_drag != null) return;
     // The same down reaches both the handle's inner listener and the body's
     // outer one; the deeper (handle) call fires first and wins, so ignore the
-    // second call for the same event.
-    if (identical(event, _lastHandledDown)) return;
-    _lastHandledDown = event;
+    // second call for the same press. Dedup on the untransformed original, since
+    // the two listeners can receive different transformed copies of it.
+    final original = event.original ?? event;
+    if (identical(original, _lastHandledDown)) return;
+    _lastHandledDown = original;
 
     _dragRecognizer?.dispose();
     _dragRecognizer = (delay == Duration.zero ? ImmediateMultiDragGestureRecognizer(debugOwner: this) : DelayedMultiDragGestureRecognizer(delay: delay, debugOwner: this))
@@ -448,7 +480,9 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
       pointer: globalPosition,
       crossExtent: box.crossAxisExtent,
       hypothesisIndex: index,
+      onCanceled: _reorder?.onReorderCanceled,
     );
+    _baseIndexCache = null; // dragged id now excluded from the base order
 
     _animator
       ..draggedId = id
@@ -512,8 +546,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     ];
     if (baseIds.isEmpty) return;
 
-    final fullBase = _baseOrder();
-    final firstBaseGlobalIndex = fullBase.indexOf(baseIds.first);
+    final firstBaseGlobalIndex = _baseIndex()[baseIds.first] ?? -1;
     if (firstBaseGlobalIndex < 0) return;
 
     final localCurrent = drag.hypothesisIndex - firstBaseGlobalIndex;
@@ -591,10 +624,23 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
     _autoScroller?.stopAutoScroll();
     _animator.lift.retarget(0, widget.style.dropSpring);
-    if (notify) _reorder?.onReorderCanceled?.call(drag.item);
+    if (notify) drag.onCanceled?.call(drag.item);
+
+    // If the item still exists, settle it home with the lift animating 1 → 0
+    // (as a drop does) rather than snapping the lifted decoration away; the
+    // ticker's settle check clears the session once both springs rest. A
+    // removed item has no slot or widget to animate, so drop it immediately.
+    final home = _itemsById.containsKey(drag.id) ? _animator.offsetOf(drag.id) : null;
+    if (home != null) {
+      _animator.settleDragged(home);
+      setState(() => drag.phase = DragPhase.settling);
+      _startTicker();
+      return;
+    }
 
     _animator.draggedId = null;
     _drag = null;
+    _baseIndexCache = null; // dragged id rejoins the base order
     if (mounted) setState(() {});
     _startTicker();
   }
@@ -602,6 +648,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   void _finishSettle() {
     _animator.draggedId = null;
     _drag = null;
+    _baseIndexCache = null; // dragged id rejoins the base order
     if (mounted) setState(() {});
   }
 

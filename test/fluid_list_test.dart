@@ -411,10 +411,12 @@ void main() {
 
     testWidgets('stops the drag when reorder is disabled mid-gesture', (tester) async {
       var finished = 0;
+      var canceled = 0;
       await tester.pumpWidget(
         _Harness(
           items: const [_Item('a', 40), _Item('b', 40), _Item('c', 40)],
           onReorderFinished: (_) => finished++,
+          onReorderCanceled: (_) => canceled++,
         ),
       );
       await tester.pump();
@@ -425,17 +427,48 @@ void main() {
       await gesture.moveBy(const Offset(0, 60));
       await tester.pump();
 
-      // Turn reordering off while dragging: the item snaps back to its slot.
+      // Turn reordering off while dragging: the item settles back to its slot
+      // and the started gesture is balanced with exactly one cancel.
       await tester.pumpWidget(
         const _Harness(items: [_Item('a', 40), _Item('b', 40), _Item('c', 40)], reorderEnabled: false),
       );
       await tester.pumpAndSettle();
       expect(tester.getTopLeft(find.text('a')).dy, moreOrLessEquals(0, epsilon: 2));
+      expect(canceled, 1, reason: 'the captured cancel balances onReorderStarted');
 
       await gesture.moveBy(const Offset(0, 60));
       await gesture.up();
       await tester.pumpAndSettle();
       expect(finished, 0);
+      expect(canceled, 1);
+    });
+
+    testWidgets('a canceled drag lowers the lift before clearing the held item', (tester) async {
+      await tester.pumpWidget(
+        const _Harness(items: [_Item('a', 40), _Item('b', 40), _Item('c', 40)], lifted: true),
+      );
+      await tester.pump();
+
+      final from = tester.getCenter(find.text('a'));
+      final gesture = await tester.startGesture(from);
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      // Drive a few frames so the lift spring has visibly risen off zero.
+      for (var step = 1; step <= 5; step++) {
+        await gesture.moveBy(const Offset(0, 8));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      final box = _render(tester);
+      expect(box.animator.lift.value, greaterThan(0), reason: 'lifted while dragging');
+
+      // Cancel the gesture: the lift must animate down, not snap, and only after
+      // it rests is the held item released.
+      await gesture.cancel();
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(box.animator.lift.value, greaterThan(0), reason: 'still lowering, not snapped to 0');
+
+      await tester.pumpAndSettle();
+      expect(box.animator.lift.value, moreOrLessEquals(0, epsilon: 0.01));
+      expect(tester.getTopLeft(find.text('a')).dy, moreOrLessEquals(0, epsilon: 2));
     });
   });
 
