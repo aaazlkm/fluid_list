@@ -21,9 +21,11 @@ class _Harness extends StatefulWidget {
     this.dragMode = FluidListDragMode.item,
     this.echoReorder = false,
     this.lifted = false,
+    this.reorderEnabled = true,
     this.transitionBuilder,
     this.onReorderStarted,
     this.onReorderFinished,
+    this.onReorderCanceled,
     this.onTapItem,
   });
 
@@ -33,9 +35,11 @@ class _Harness extends StatefulWidget {
   final FluidListDragMode dragMode;
   final bool echoReorder;
   final bool lifted;
+  final bool reorderEnabled;
   final FluidListTransitionBuilder? transitionBuilder;
   final void Function(_Item)? onReorderStarted;
   final void Function(FluidListReorderResult<_Item>)? onReorderFinished;
+  final void Function(_Item)? onReorderCanceled;
   final void Function(_Item)? onTapItem;
 
   @override
@@ -82,15 +86,18 @@ class _HarnessState extends State<_Harness> {
         scrollDirection: widget.axis,
         spacing: widget.spacing,
         idOf: (item) => item.id,
-        reorder: FluidListReorderEnabled(
-          dragMode: widget.dragMode,
-          dragStartDelay: _dragDelay,
-          onReorderStarted: widget.onReorderStarted,
-          onReorderFinished: (result) {
-            widget.onReorderFinished?.call(result);
-            if (widget.echoReorder) setState(() => _items = result.items);
-          },
-        ),
+        reorder: widget.reorderEnabled
+            ? FluidListReorderEnabled(
+                dragMode: widget.dragMode,
+                dragStartDelay: _dragDelay,
+                onReorderStarted: widget.onReorderStarted,
+                onReorderCanceled: widget.onReorderCanceled,
+                onReorderFinished: (result) {
+                  widget.onReorderFinished?.call(result);
+                  if (widget.echoReorder) setState(() => _items = result.items);
+                },
+              )
+            : const FluidListReorderDisabled(),
         liftedBuilder: widget.lifted
             ? (context, item, animation, child) => DecoratedBox(
                 decoration: const BoxDecoration(color: Color(0x11000000)),
@@ -344,6 +351,91 @@ void main() {
       await tester.pump();
 
       expect(tapped?.id, 'a');
+    });
+  });
+
+  group('reorder lifecycle', () {
+    testWidgets('does not cancel after finishing when the item leaves during settle', (tester) async {
+      var finished = 0;
+      var canceled = 0;
+      Widget harness(List<_Item> items) => _Harness(
+        items: items,
+        onReorderFinished: (_) => finished++,
+        onReorderCanceled: (_) => canceled++,
+      );
+
+      await tester.pumpWidget(harness(const [_Item('a', 40), _Item('b', 40), _Item('c', 40)]));
+      await tester.pump();
+
+      // Drag 'a' down and release, then pump just one frame so it is settling.
+      final from = tester.getCenter(find.text('a'));
+      final gesture = await tester.startGesture(from);
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      for (var step = 1; step <= 6; step++) {
+        await gesture.moveTo(from + Offset(0, 90.0 * step / 6));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await gesture.up();
+      await tester.pump(const Duration(milliseconds: 16));
+      expect(finished, 1);
+
+      // The dragged item leaves the data mid-settle (e.g. deleted elsewhere).
+      await tester.pumpWidget(harness(const [_Item('b', 40), _Item('c', 40)]));
+      await tester.pumpAndSettle();
+
+      expect(finished, 1);
+      expect(canceled, 0, reason: 'no cancel after a finish for the same gesture');
+    });
+
+    testWidgets('fires onReorderCanceled when disposed mid-drag', (tester) async {
+      _Item? canceled;
+      await tester.pumpWidget(
+        _Harness(
+          items: const [_Item('a', 40), _Item('b', 40)],
+          onReorderCanceled: (item) => canceled = item,
+        ),
+      );
+      await tester.pump();
+
+      final gesture = await tester.startGesture(tester.getCenter(find.text('a')));
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      await gesture.moveBy(const Offset(0, 12));
+      await tester.pump();
+
+      // Tear the list down while the drag is active.
+      await tester.pumpWidget(const SizedBox());
+      expect(canceled?.id, 'a');
+
+      await gesture.up();
+    });
+
+    testWidgets('stops the drag when reorder is disabled mid-gesture', (tester) async {
+      var finished = 0;
+      await tester.pumpWidget(
+        _Harness(
+          items: const [_Item('a', 40), _Item('b', 40), _Item('c', 40)],
+          onReorderFinished: (_) => finished++,
+        ),
+      );
+      await tester.pump();
+
+      final from = tester.getCenter(find.text('a'));
+      final gesture = await tester.startGesture(from);
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      await gesture.moveBy(const Offset(0, 60));
+      await tester.pump();
+
+      // Turn reordering off while dragging: the item snaps back to its slot.
+      await tester.pumpWidget(
+        const _Harness(items: [_Item('a', 40), _Item('b', 40), _Item('c', 40)], reorderEnabled: false),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getTopLeft(find.text('a')).dy, moreOrLessEquals(0, epsilon: 2));
+
+      await gesture.moveBy(const Offset(0, 60));
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(finished, 0);
     });
   });
 

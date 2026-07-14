@@ -184,6 +184,10 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
   @override
   void dispose() {
+    // Balance an onReorderStarted a listener saw: if we're torn down mid-drag,
+    // report the cancel. (Only for an active drag — a settling one already
+    // reported onReorderFinished.)
+    if (_drag?.isActive ?? false) _reorder?.onReorderCanceled?.call(_drag!.item);
     _dragRecognizer?.dispose();
     _ticker.dispose();
     super.dispose();
@@ -248,7 +252,16 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
     final drag = _drag;
     if (drag != null) {
-      if (!_itemsById.containsKey(drag.id)) {
+      if (!drag.isActive) {
+        // Settling: the drop already reported onReorderFinished. If the item
+        // left the data or reordering was turned off, finish quietly — never
+        // fire a cancel after a finish for the same gesture.
+        if (!_reorderEnabled || !_itemsById.containsKey(drag.id)) _finishSettle();
+      } else if (!_reorderEnabled) {
+        // Reordering was disabled mid-drag: stop it (the config carries no
+        // callbacks now, so nothing to notify).
+        _abortDrag(notify: false);
+      } else if (!_itemsById.containsKey(drag.id)) {
         _abortDrag(notify: true);
       } else {
         drag.hypothesisIndex = drag.hypothesisIndex.clamp(0, _baseOrder().length);
