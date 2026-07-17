@@ -160,6 +160,7 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
         earliestUsefulChild = childAfter(earliestUsefulChild);
         leadingChildrenWithoutLayoutOffset += 1;
       }
+      _dropSpringsForGarbage(leadingChildrenWithoutLayoutOffset, 0);
       collectGarbage(leadingChildrenWithoutLayoutOffset, 0);
       if (firstChild == null) {
         if (!addInitialChild()) {
@@ -266,11 +267,15 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
       if (!advance()) {
         assert(leadingGarbage == childCount);
         assert(child == null);
+        _dropSpringsForGarbage(leadingGarbage - 1, 0);
         collectGarbage(leadingGarbage - 1, 0);
         assert(firstChild == lastChild);
         final extent = childScrollOffset(lastChild!)! + paintExtentOf(lastChild!);
         geometry = SliverGeometry(scrollExtent: extent, maxPaintExtent: extent);
         _recordBuiltWindow();
+        // Balance the didStartLayout() above: this is a terminal return, not a
+        // scroll-offset-correction redo, so the child manager must finish too.
+        childManager.didFinishLayout();
         return;
       }
     }
@@ -403,6 +408,17 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
     return id == null || !_applyEffects ? 1.0 : _animator.visualOf(id).scale;
   }
 
+  /// The dragged item's extra paint scale from the lift (1 at rest, growing to
+  /// [FluidListStyle.liftScale] fully lifted). Shared by paint, hit testing, and
+  /// [applyPaintTransform] so the interactive area tracks the visible one.
+  double get _dragLiftScale => 1 + (_style.liftScale - 1) * _animator.lift.value;
+
+  /// A child's effective opacity, matching what [_paintChild] would render.
+  double _effectiveOpacityOf(SliverFluidListParentData data) {
+    final id = data.id;
+    return id == null || !_applyEffects ? 1.0 : _animator.visualOf(id).opacity.clamp(0.0, 1.0);
+  }
+
   @override
   void paint(PaintingContext context, Offset offset) {
     if (firstChild == null) return;
@@ -419,16 +435,15 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
       child = childAfter(child);
     }
     if (dragged != null) {
-      _paintChild(context, offset, dragged, extraScale: 1 + (_style.liftScale - 1) * _animator.lift.value);
+      _paintChild(context, offset, dragged, extraScale: _dragLiftScale);
     }
   }
 
   void _paintChild(PaintingContext context, Offset offset, RenderBox child, {double extraScale = 1}) {
     final data = _dataOf(child);
-    final id = data.id;
     final childOffset = _slotPaintOffset(child) + offset;
 
-    final opacity = id == null || !_applyEffects ? 1.0 : _animator.visualOf(id).opacity.clamp(0.0, 1.0);
+    final opacity = _effectiveOpacityOf(data);
     if (opacity <= 0) return;
 
     final scale = _effectScaleOf(data) * extraScale;
@@ -460,14 +475,15 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
     final boxResult = BoxHitTestResult.wrap(result);
     final hitPoint = _composePaint(mainAxisPosition, crossAxisPosition);
 
-    // The dragged child paints on top, so test it first.
+    // The dragged child paints on top, so test it first — with the same lift
+    // scale it paints with, so its interactive area matches its pixels.
     final draggedId = _animator.draggedId;
     if (draggedId != null) {
       var child = firstChild;
       while (child != null) {
         final data = _dataOf(child);
         if (data.role == ListChildRole.item && data.id == draggedId) {
-          if (_hitTestChild(boxResult, child, hitPoint)) return true;
+          if (_effectiveOpacityOf(data) > 0 && _hitTestChild(boxResult, child, hitPoint, extraScale: _dragLiftScale)) return true;
           break;
         }
         child = childAfter(child);
@@ -477,7 +493,9 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
     var child = lastChild;
     while (child != null) {
       final data = _dataOf(child);
-      if (data.role != ListChildRole.ghost && data.id != draggedId) {
+      // Skip ghosts, the dragged child (tested above), and anything painted
+      // fully transparent so an invisible row cannot absorb a tap.
+      if (data.role != ListChildRole.ghost && data.id != draggedId && _effectiveOpacityOf(data) > 0) {
         if (_hitTestChild(boxResult, child, hitPoint)) return true;
       }
       child = childBefore(child);
@@ -485,8 +503,8 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
     return false;
   }
 
-  bool _hitTestChild(BoxHitTestResult result, RenderBox child, Offset hitPoint) {
-    final transform = _paintTransformOf(child);
+  bool _hitTestChild(BoxHitTestResult result, RenderBox child, Offset hitPoint, {double extraScale = 1}) {
+    final transform = _paintTransformOf(child, extraScale: extraScale);
     return result.addWithPaintTransform(
       transform: transform,
       position: hitPoint,
@@ -513,7 +531,7 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
 
   @override
   void applyPaintTransform(RenderBox child, Matrix4 transform) {
-    final extraScale = _dataOf(child).id == _animator.draggedId ? 1 + (_style.liftScale - 1) * _animator.lift.value : 1.0;
+    final extraScale = _dataOf(child).id == _animator.draggedId ? _dragLiftScale : 1.0;
     transform.multiply(_paintTransformOf(child, extraScale: extraScale));
   }
 

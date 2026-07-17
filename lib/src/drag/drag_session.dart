@@ -21,11 +21,17 @@ class DragSession<T> {
     required this.pointer,
     required this.crossExtent,
     required this.hypothesisIndex,
+    this.onCanceled,
   });
 
   final Object id;
   final T item;
   final int fromIndex;
+
+  /// The cancel callback captured at lift, so a drag that is aborted after the
+  /// reorder config was swapped out (e.g. reordering turned off mid-gesture)
+  /// still balances the `onReorderStarted` it emitted.
+  final void Function(T item)? onCanceled;
 
   /// Pointer position minus the item's top-left, captured at lift and held
   /// constant so the item stays put under the finger.
