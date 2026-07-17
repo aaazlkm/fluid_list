@@ -1,0 +1,21 @@
+name: fluid_list_example
+description: A demo for fluid_list — spring-animated show/hide/move and drag-to-reorder.
+publish_to: none
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.12.1 <4.0.0"
+  flutter: ">=3.44.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  fluid_list:
+    path: ../
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
