@@ -41,10 +41,12 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
     required double spacing,
     required FluidListStyle style,
     required bool applyEffects,
+    required bool dragProxyActive,
   }) : _animator = animator,
        _spacing = spacing,
        _style = style,
-       _applyEffects = applyEffects;
+       _applyEffects = applyEffects,
+       _dragProxyActive = dragProxyActive;
 
   ListAnimator _animator;
   ListAnimator get animator => _animator;
@@ -72,6 +74,18 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
   set applyEffects(bool value) {
     if (_applyEffects == value) return;
     _applyEffects = value;
+    markNeedsPaint();
+  }
+
+  /// Whether an overlay drag proxy is currently rendering the held item. While
+  /// it is, the in-list dragged child is a zero-content placeholder: this render
+  /// object skips painting and hit-testing it and drops the lift scale, leaving
+  /// the overlay as the single source of the lifted pixels. Only affects paint,
+  /// not layout, so a plain `markNeedsPaint` on change is enough.
+  bool _dragProxyActive;
+  set dragProxyActive(bool value) {
+    if (_dragProxyActive == value) return;
+    _dragProxyActive = value;
     markNeedsPaint();
   }
 
@@ -434,7 +448,10 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
       }
       child = childAfter(child);
     }
-    if (dragged != null) {
+    // While the overlay proxy owns the lifted pixels the in-list dragged child
+    // is an empty placeholder, so there is nothing to paint on top; painting it
+    // would only allocate a needless transform/opacity layer around a blank box.
+    if (dragged != null && !_dragProxyActive) {
       _paintChild(context, offset, dragged, extraScale: _dragLiftScale);
     }
   }
@@ -476,9 +493,12 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
     final hitPoint = _composePaint(mainAxisPosition, crossAxisPosition);
 
     // The dragged child paints on top, so test it first — with the same lift
-    // scale it paints with, so its interactive area matches its pixels.
+    // scale it paints with, so its interactive area matches its pixels. Skipped
+    // when the overlay proxy is active: the in-list child is then an empty,
+    // non-interactive placeholder (the live pointer is already owned by the drag
+    // recognizer), matching the SDK's non-hittable lifted item.
     final draggedId = _animator.draggedId;
-    if (draggedId != null) {
+    if (draggedId != null && !_dragProxyActive) {
       var child = firstChild;
       while (child != null) {
         final data = _dataOf(child);
@@ -531,7 +551,7 @@ class RenderSliverFluidList extends RenderSliverMultiBoxAdaptor {
 
   @override
   void applyPaintTransform(RenderBox child, Matrix4 transform) {
-    final extraScale = _dataOf(child).id == _animator.draggedId ? _dragLiftScale : 1.0;
+    final extraScale = !_dragProxyActive && _dataOf(child).id == _animator.draggedId ? _dragLiftScale : 1.0;
     transform.multiply(_paintTransformOf(child, extraScale: extraScale));
   }
 

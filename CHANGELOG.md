@@ -3,17 +3,32 @@
 ## 0.5.0
 
 - **Breaking:** the reorder settings are now one sealed `reorder` parameter instead of the separate
-  `reorderEnabled` / `dragMode` / `dragStartDelay` / `autoScrollVelocityScalar` / `onReorderStarted`
+  `reorderEnabled` / `dragMode` / `dragStartDelay` / autoscroll speed / `onReorderStarted`
   / `onReorderFinished` / `onReorderCanceled` fields.
   - Pass `FluidListReorderEnabled(dragMode: ..., onReorderFinished: ...)` to turn reordering on, or
     `FluidListReorderDisabled` (the default when `reorder` is omitted) to keep it off. Factory
     constructors `FluidListReorder.enabled(...)` / `FluidListReorder.disabled()` are also available.
-  - `autoScrollVelocityScalar` moved onto `FluidListReorderEnabled` (it only applies while dragging).
+  - The autoscroll behavior moved onto `FluidListReorderEnabled` as a single `autoScroll`
+    (`FluidListAutoScrollConfig`) object (it only applies while dragging).
   - **Reordering is now off by default** (was on): add `reorder: FluidListReorderEnabled(...)` to
     lists that should reorder.
 - `FluidList`'s scroll parameters now mirror `ListView`: added `primary`, `scrollCacheExtent`,
   `dragStartBehavior`, `keyboardDismissBehavior`, `restorationId`, `clipBehavior`, and
   `hitTestBehavior`; `padding` is now an `EdgeInsetsGeometry?`. (Reversed axes remain unsupported.)
+- Fixed autoscroll stalling after a step or two when an item was held at a viewport edge without
+  moving the finger; it now scrolls continuously until the finger leaves the edge.
+- Autoscroll now engages once the held item's edge comes within a trigger distance of a viewport
+  edge (not only after it crosses), and the speed scales with proximity to the edge — slower where
+  the item enters the zone, fastest at and past the edge — easing toward that target rather than
+  jumping to it. All of its knobs live on `FluidListAutoScrollConfig` (passed as
+  `FluidListReorderEnabled(autoScroll: ...)`): `startVelocity` (speed entering the zone),
+  `maxVelocity` (speed at the edge), `edgeTriggerDistance` (how far from the edge it engages), and
+  `rampDuration` (`Duration.zero` tracks the position immediately). It resets when the item leaves
+  the zone.
+- The dragged item now renders in the app's `Overlay`, so it floats above every sibling sliver and
+  the app bar instead of slipping under whatever the viewport paints on top of the list. Falls back
+  to painting the lifted item in place when no `Overlay` is in scope. Note: the held item's widget
+  `State` is rebuilt when it lifts and again when it drops (same trade-off as `ReorderableList`).
 
 ## 0.4.0
 

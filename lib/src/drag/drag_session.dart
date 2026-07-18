@@ -1,4 +1,4 @@
-import 'dart:ui' show Offset, VoidCallback;
+import 'dart:ui' show Offset, Size, VoidCallback;
 
 import 'package:flutter/gestures.dart';
 
@@ -20,6 +20,7 @@ class DragSession<T> {
     required this.grabOffset,
     required this.pointer,
     required this.crossExtent,
+    required this.itemSize,
     required this.hypothesisIndex,
     this.onCanceled,
   });
@@ -40,6 +41,11 @@ class DragSession<T> {
   /// Content cross-axis extent at lift. A change means the list was resized and
   /// all cached geometry is stale.
   final double crossExtent;
+
+  /// The dragged item's size, captured at lift. Held constant for the drag's
+  /// lifetime and used to size the overlay drag proxy; a cross-extent change
+  /// already aborts the drag, so this can never go stale under the finger.
+  final Size itemSize;
 
   Offset pointer;
 
