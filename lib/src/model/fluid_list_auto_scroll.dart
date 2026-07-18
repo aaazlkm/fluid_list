@@ -17,7 +17,9 @@ class FluidListAutoScrollConfig {
     this.maxVelocity = 3000,
     this.edgeTriggerDistance = 100,
     this.rampDuration = const Duration(milliseconds: 3000),
-  });
+  }) : assert(startVelocity >= 0 && startVelocity < double.infinity, 'startVelocity must be a finite, non-negative value.'),
+       assert(maxVelocity >= 0 && maxVelocity < double.infinity, 'maxVelocity must be a finite, non-negative value.'),
+       assert(edgeTriggerDistance >= 0 && edgeTriggerDistance < double.infinity, 'edgeTriggerDistance must be a finite, non-negative value.');
 
   /// Speed (logical px/s) auto-scroll runs at when the held item first enters the
   /// trigger zone ([edgeTriggerDistance] from the edge). It scales up toward
@@ -35,11 +37,17 @@ class FluidListAutoScrollConfig {
 
   /// How long the item must stay at a given position for the speed to ease up to
   /// that position's target. [Duration.zero] makes the speed track the position
-  /// at once (no ease-in).
+  /// at once (no ease-in). A negative duration is treated the same as
+  /// [Duration.zero].
   final Duration rampDuration;
 
   @override
-  bool operator ==(Object other) => other is FluidListAutoScrollConfig && other.startVelocity == startVelocity && other.maxVelocity == maxVelocity && other.edgeTriggerDistance == edgeTriggerDistance && other.rampDuration == rampDuration;
+  bool operator ==(Object other) =>
+      other is FluidListAutoScrollConfig &&
+      other.startVelocity == startVelocity &&
+      other.maxVelocity == maxVelocity &&
+      other.edgeTriggerDistance == edgeTriggerDistance &&
+      other.rampDuration == rampDuration;
 
   @override
   int get hashCode => Object.hash(startVelocity, maxVelocity, edgeTriggerDistance, rampDuration);
