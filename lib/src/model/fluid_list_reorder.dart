@@ -29,7 +29,7 @@ sealed class FluidListReorder<T> {
   /// Reordering is disabled. Same as [FluidListReorderDisabled].
   const factory FluidListReorder.disabled() = FluidListReorderDisabled<T>;
 
-  /// Reordering is enabled with these options. Same asR
+  /// Reordering is enabled with these options. Same as
   /// [FluidListReorderEnabled].
   const factory FluidListReorder.enabled({
     FluidListDragMode dragMode,
