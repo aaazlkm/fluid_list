@@ -86,7 +86,10 @@ class DragProxy {
       child: ListenableBuilder(
         listenable: repaint,
         // Built once per entry build; the geometry-only rebuilds below reuse it.
-        child: IgnorePointer(child: contentBuilder(context)),
+        // The Builder defers [contentBuilder] to a context *inside* the captured
+        // themes and MediaQuery above, so inherited lookups in the user's item
+        // builders resolve the list's ancestry, not the raw overlay entry's.
+        child: IgnorePointer(child: Builder(builder: contentBuilder)),
         builder: (context, child) {
           final overlayBox = overlay.context.findRenderObject()! as RenderBox;
           final origin = overlayBox.localToGlobal(Offset.zero);
