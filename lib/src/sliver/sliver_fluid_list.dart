@@ -645,11 +645,13 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
     // Target speed scales with proximity to the edge: startVelocity where the
     // item enters the zone (dist == trigger) up to maxVelocity at and past the
-    // edge (dist <= 0). Velocity then eases toward that target over the ramp
-    // duration (persisting across frames, reset to 0 off the edge) — so nearer
-    // the edge is faster, and it accelerates in rather than snapping. A drop in
-    // the target (finger pulled back) is followed at once, so only speeding up is
-    // gradual.
+    // edge (dist <= 0). Velocity then climbs toward that target at the constant
+    // rate (max - start) / rampDuration — a full start-to-max ramp takes
+    // rampDuration, and shallower targets saturate proportionally sooner — with
+    // the velocity persisting across frames and reset to 0 off the edge. So
+    // nearer the edge is faster, and it accelerates in rather than snapping. A
+    // drop in the target (finger pulled back) is followed at once, so only
+    // speeding up is gradual.
     final peak = cfg.maxVelocity;
     final minSpeed = math.min(cfg.startVelocity, peak); // guard start > max
     final d = trigger <= 0 ? 1.0 : (1 - dist / trigger).clamp(0.0, 1.0);

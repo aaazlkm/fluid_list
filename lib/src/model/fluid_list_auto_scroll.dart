@@ -7,9 +7,10 @@ import 'package:flutter/foundation.dart';
 /// [edgeTriggerDistance] of a viewport edge. Across that zone the speed scales
 /// with proximity to the edge — [startVelocity] where the item first enters the
 /// zone, up to [maxVelocity] once its edge reaches (or passes) the viewport
-/// edge — and the velocity eases toward that target over [rampDuration]. Setting
-/// [rampDuration] to [Duration.zero] drops the ease-in so the speed tracks the
-/// position immediately.
+/// edge — and the velocity climbs toward that target at a constant rate, sized
+/// so a full ramp from [startVelocity] to [maxVelocity] takes [rampDuration].
+/// Setting [rampDuration] to [Duration.zero] drops the ease-in so the speed
+/// tracks the position immediately.
 @immutable
 class FluidListAutoScrollConfig {
   const FluidListAutoScrollConfig({
@@ -35,9 +36,12 @@ class FluidListAutoScrollConfig {
   /// [startVelocity] (at this distance) to [maxVelocity] (at the edge).
   final double edgeTriggerDistance;
 
-  /// How long the item must stay at a given position for the speed to ease up to
-  /// that position's target. [Duration.zero] makes the speed track the position
-  /// at once (no ease-in). A negative duration is treated the same as
+  /// How long the speed takes to climb from [startVelocity] all the way to
+  /// [maxVelocity]. The velocity accelerates at the constant rate
+  /// ([maxVelocity] − [startVelocity]) / [rampDuration], so a target partway
+  /// into the trigger zone saturates proportionally sooner than the full
+  /// duration. [Duration.zero] makes the speed track the position's target at
+  /// once (no ease-in); a negative duration is treated the same as
   /// [Duration.zero].
   final Duration rampDuration;
 
