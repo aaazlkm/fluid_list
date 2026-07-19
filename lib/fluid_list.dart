@@ -13,6 +13,7 @@
 library;
 
 export 'src/fluid_list.dart' show FluidList;
+export 'src/model/fluid_list_auto_scroll.dart' show FluidListAutoScrollConfig;
 export 'src/model/fluid_list_reorder.dart' show FluidListDragMode, FluidListReorder, FluidListReorderDisabled, FluidListReorderEnabled;
 export 'src/model/fluid_list_reorder_result.dart' show FluidListReorderResult;
 export 'src/model/fluid_list_style.dart' show FluidListEffect, FluidListStyle, ResolvedFluidListEffect;

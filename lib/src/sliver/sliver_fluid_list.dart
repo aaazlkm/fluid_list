@@ -1,11 +1,16 @@
+import 'dart:math' as math;
+
 import 'package:fluid_list/src/animation/list_animator.dart';
+import 'package:fluid_list/src/drag/drag_proxy.dart';
 import 'package:fluid_list/src/drag/drag_session.dart';
 import 'package:fluid_list/src/drag/insertion_resolver.dart';
+import 'package:fluid_list/src/model/fluid_list_auto_scroll.dart';
 import 'package:fluid_list/src/model/fluid_list_reorder.dart';
 import 'package:fluid_list/src/model/fluid_list_reorder_result.dart';
 import 'package:fluid_list/src/model/fluid_list_style.dart';
 import 'package:fluid_list/src/sliver/render_sliver_fluid_list.dart';
 import 'package:fluid_list/src/widget/fluid_list_drag_handle.dart';
+import 'package:flutter/foundation.dart' show precisionErrorTolerance;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
@@ -118,8 +123,22 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   /// blocked.
   PointerEvent? _lastHandledDown;
 
-  EdgeDraggingAutoScroller? _autoScroller;
   ScrollableState? _scrollable;
+
+  /// The current autoscroll speed in logical px/s (0 when not scrolling). Each
+  /// tick at the edge it eases toward the target for the item's current depth
+  /// past the edge; reset to 0 the moment the held item leaves the edge or the
+  /// drag ends.
+  double _autoScrollVelocity = 0;
+
+  /// The overlay entry rendering the lifted item above every sibling sliver,
+  /// non-null only while a drag has one (an [Overlay] is in scope). Its geometry
+  /// is rebuilt from [_proxyRepaint] each tick; its content only when the item
+  /// data or builders change.
+  DragProxy? _dragProxy;
+  final DragProxyRepaint _proxyRepaint = DragProxyRepaint();
+
+  bool get _proxyActive => _dragProxy != null;
 
   final Map<Object, _Ghost<T>> _ghosts = {};
   final Map<Object, T> _itemsById = {};
@@ -161,35 +180,18 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    final scrollable = Scrollable.maybeOf(context);
-    if (scrollable != _scrollable) {
-      _scrollable = scrollable;
-      _rebuildAutoScroller();
-    }
+    // Track the enclosing scrollable; the drag ticker scrolls it directly.
+    _scrollable = Scrollable.maybeOf(context);
   }
 
-  double _scalarOf(FluidListReorder<T>? reorder) => reorder is FluidListReorderEnabled<T> ? reorder.autoScrollVelocityScalar : kFluidListDefaultAutoScrollVelocityScalar;
-
-  void _rebuildAutoScroller() {
-    // Stop the outgoing scroller first: otherwise a scrollable/velocity change
-    // mid-drag leaves its loop running while later stopAutoScroll calls only
-    // reach the replacement.
-    _autoScroller?.stopAutoScroll();
-    final scrollable = _scrollable;
-    _autoScroller = scrollable == null
-        ? null
-        : EdgeDraggingAutoScroller(
-            scrollable,
-            onScrollViewScrolled: _onScrollViewScrolled,
-            velocityScalar: _scalarOf(widget.reorder),
-          );
-  }
+  /// The configured autoscroll behavior (speeds, distance sensitivity, ramp).
+  FluidListAutoScrollConfig get _autoScroll => _reorder?.autoScroll ?? const FluidListAutoScrollConfig();
 
   @override
   void didUpdateWidget(covariant SliverFluidList<T> oldWidget) {
     super.didUpdateWidget(oldWidget);
     _animator.style = widget.style;
-    if (_scalarOf(oldWidget.reorder) != _scalarOf(widget.reorder)) _rebuildAutoScroller();
+    // The velocity scalar is read live each tick, so no scroller to rebuild.
     _reconcile();
   }
 
@@ -199,7 +201,9 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     // report the cancel. (Only for an active drag — a settling one already
     // reported onReorderFinished.)
     if (_drag?.isActive ?? false) _drag!.onCanceled?.call(_drag!.item);
-    _autoScroller?.stopAutoScroll();
+    _autoScrollVelocity = 0;
+    _disposeDragProxy();
+    _proxyRepaint.dispose();
     _dragRecognizer?.dispose();
     _ticker.dispose();
     super.dispose();
@@ -279,6 +283,14 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
       } else {
         drag.hypothesisIndex = drag.hypothesisIndex.clamp(0, _baseOrder().length);
       }
+    }
+
+    // The item's data or the builders may have changed; refresh the proxy's
+    // content. Deferred to after this frame because _reconcile runs during the
+    // build phase (from didUpdateWidget), and marking the overlay entry — a
+    // separate subtree — dirty mid-build is illegal. One frame late is fine.
+    if (_dragProxy != null) {
+      SchedulerBinding.instance.addPostFrameCallback((_) => _dragProxy?.markNeedsBuild());
     }
 
     _startTicker();
@@ -365,8 +377,14 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
     final drag = _drag;
     if (drag != null && drag.isActive) {
+      // Scroll first, then re-pin: _applyPointer keeps the item under the finger
+      // and re-resolves the drop slot against the new scroll offset.
+      _stepAutoScroll(dt);
       _applyPointer();
     }
+    // Re-read the proxy's position/scale every frame the drag exists, including
+    // while it settles home after the drop (when _applyPointer no longer runs).
+    if (drag != null) _proxyRepaint.ping();
 
     if (result.exited.isNotEmpty) {
       setState(() {
@@ -479,6 +497,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
       grabOffset: _globalToContent(globalPosition) - topLeft,
       pointer: globalPosition,
       crossExtent: box.crossAxisExtent,
+      itemSize: size,
       hypothesisIndex: index,
       onCanceled: _reorder?.onReorderCanceled,
     );
@@ -488,6 +507,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
       ..draggedId = id
       ..lift.retarget(1, widget.style.dropSpring);
 
+    _createDragProxy();
     _startTicker();
     _reorder?.onReorderStarted?.call(item);
     setState(() {});
@@ -497,6 +517,51 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
       onEnd: _onDragEnd,
       onCancel: () => _abortDrag(notify: true),
     );
+  }
+
+  // --- Drag proxy (overlay) ---
+
+  /// Lifts the dragged item into the app's [Overlay] so it paints above every
+  /// sibling sliver. No-op when there is no overlay in scope, in which case the
+  /// render object keeps painting the lifted item in place (the fallback path).
+  void _createDragProxy() {
+    final overlay = Overlay.maybeOf(context);
+    if (overlay == null) return;
+    _dragProxy = DragProxy(
+      listContext: context,
+      overlay: overlay,
+      globalTopLeft: () {
+        final drag = _drag;
+        final box = _renderBox;
+        if (drag == null || box == null || !box.attached) return null;
+        final offset = _animator.offsetOf(drag.id);
+        return offset == null ? null : _contentToGlobal(offset);
+      },
+      liftScale: () => 1 + (widget.style.liftScale - 1) * _animator.lift.value,
+      size: () => _drag?.itemSize ?? Size.zero,
+      contentBuilder: _buildProxyContent,
+      repaint: _proxyRepaint,
+    )..insert();
+  }
+
+  void _disposeDragProxy() {
+    _dragProxy?.dispose();
+    _dragProxy = null;
+  }
+
+  /// The lifted item's content for the overlay proxy: the item widget wrapped by
+  /// any [FluidListLiftedBuilder], driven by the same lift animation the in-list
+  /// path uses. Reads the live item so a mid-drag data update is reflected;
+  /// falls back to the session snapshot if it just left the data.
+  Widget _buildProxyContent(BuildContext context) {
+    final drag = _drag;
+    if (drag == null) return const SizedBox.shrink();
+    final item = _itemsById[drag.id] ?? drag.item;
+    var child = widget.itemBuilder(context, item);
+    if (widget.liftedBuilder != null) {
+      child = widget.liftedBuilder!(context, item, _liftAnimation, child);
+    }
+    return child;
   }
 
   int _locate(Object id) => widget.items.indexWhere((item) => widget.idOf(item) == id);
@@ -513,16 +578,93 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
 
     drag.pointer = globalPosition;
     _applyPointer();
-
-    final size = box.itemSizes[drag.id];
-    final topLeft = _animator.offsetOf(drag.id);
-    if (size != null && topLeft != null) {
-      _autoScroller?.startAutoScrollIfNecessary(_contentToGlobal(topLeft) & size);
-    }
   }
 
-  void _onScrollViewScrolled() {
-    if (_drag?.isActive ?? false) _applyPointer();
+  /// Advances the enclosing scrollable when the held item is pushed past a
+  /// viewport edge, accelerating the longer the item is held there.
+  ///
+  /// Runs once per frame from the drag ticker (so holding the finger still in the
+  /// trigger zone keeps scrolling — the position is retested from the finger-
+  /// pinned item every frame, never from a stored rect that could go stale). The
+  /// speed scales with how near the edge the item is and eases up to that
+  /// position's target over the configured ramp duration; it drops to 0 the
+  /// instant the item leaves the trigger zone, so re-entering ramps up again.
+  void _stepAutoScroll(double dt) {
+    final drag = _drag;
+    final box = _renderBox;
+    final scrollable = _scrollable;
+    final position = scrollable?.position;
+    if (drag == null || !drag.isActive || box == null || scrollable == null || position == null) {
+      _autoScrollVelocity = 0;
+      return;
+    }
+
+    final viewport = scrollable.context.findRenderObject();
+    final size = box.itemSizes[drag.id];
+    if (viewport is! RenderBox || size == null) {
+      _autoScrollVelocity = 0;
+      return;
+    }
+
+    // Derive the item's top-left from the pointer this frame rather than reading
+    // the animator's offset from last frame: within one frame the scroll offset
+    // in _globalToContent and _contentToGlobal cancels, so this is the exact
+    // finger-pinned position. Using the stale animator offset would instead make
+    // the measured overshoot shrink by the previous frame's scroll step, which
+    // self-limits the speed at shallow edge depths.
+    final topLeft = _globalToContent(drag.pointer) - drag.grabOffset;
+
+    // Both rects in global space, so preceding slivers (app bar, other lists)
+    // and transforms are accounted for, exactly like the SDK autoscroller.
+    final viewportRect = MatrixUtils.transformRect(viewport.getTransformTo(null), Offset.zero & viewport.size);
+    final itemRect = _contentToGlobal(topLeft) & size;
+    final vertical = box.axis == Axis.vertical;
+    final viewportStart = vertical ? viewportRect.top : viewportRect.left;
+    final viewportEnd = vertical ? viewportRect.bottom : viewportRect.right;
+    final itemStart = vertical ? itemRect.top : itemRect.left;
+    final itemEnd = vertical ? itemRect.bottom : itemRect.right;
+
+    // Forward, non-reversed axes only (the render object already asserts this).
+    // Auto-scroll engages once the item's leading edge is within the trigger
+    // distance of a viewport edge; `dist` is how far that edge still is from the
+    // viewport edge (negative once it has crossed).
+    final cfg = _autoScroll;
+    final trigger = cfg.edgeTriggerDistance;
+    final int direction;
+    final double dist;
+    if (itemStart - viewportStart < trigger && position.pixels > position.minScrollExtent) {
+      direction = -1;
+      dist = itemStart - viewportStart;
+    } else if (viewportEnd - itemEnd < trigger && position.pixels < position.maxScrollExtent) {
+      direction = 1;
+      dist = viewportEnd - itemEnd;
+    } else {
+      _autoScrollVelocity = 0; // outside the trigger zone → reset the ramp
+      return;
+    }
+
+    // Target speed scales with proximity to the edge: startVelocity where the
+    // item enters the zone (dist == trigger) up to maxVelocity at and past the
+    // edge (dist <= 0). Velocity then climbs toward that target at the constant
+    // rate (max - start) / rampDuration — a full start-to-max ramp takes
+    // rampDuration, and shallower targets saturate proportionally sooner — with
+    // the velocity persisting across frames and reset to 0 off the edge. So
+    // nearer the edge is faster, and it accelerates in rather than snapping. A
+    // drop in the target (finger pulled back) is followed at once, so only
+    // speeding up is gradual.
+    final peak = cfg.maxVelocity;
+    final minSpeed = math.min(cfg.startVelocity, peak); // guard start > max
+    final d = trigger <= 0 ? 1.0 : (1 - dist / trigger).clamp(0.0, 1.0);
+    final target = minSpeed + (peak - minSpeed) * d;
+    final rampSeconds = cfg.rampDuration.inMicroseconds / Duration.microsecondsPerSecond;
+    // A zero (or negative) ramp tracks the depth target immediately.
+    final accel = rampSeconds <= 0 ? double.infinity : (peak - minSpeed) / rampSeconds;
+    _autoScrollVelocity = _autoScrollVelocity < target ? math.min(target, math.max(minSpeed, _autoScrollVelocity) + accel * dt) : target;
+
+    final newPixels = (position.pixels + direction * _autoScrollVelocity * dt).clamp(position.minScrollExtent, position.maxScrollExtent);
+    if ((newPixels - position.pixels).abs() > precisionErrorTolerance) {
+      position.jumpTo(newPixels);
+    }
   }
 
   /// Pin the item under the finger and re-resolve where it would land among the
@@ -535,6 +677,9 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     final topLeft = _globalToContent(drag.pointer) - drag.grabOffset;
     _animator.setDragOffset(topLeft);
     box.markNeedsPaint();
+    // Move the overlay proxy the same frame as the pointer/scroll event that
+    // drove this, rather than waiting for the next tick.
+    _proxyRepaint.ping();
 
     final draggedSize = box.itemSizes[drag.id];
     final firstBuiltOffset = box.firstBuiltItemOffset;
@@ -572,7 +717,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     final box = _renderBox;
     if (drag == null) return;
 
-    _autoScroller?.stopAutoScroll();
+    _autoScrollVelocity = 0;
 
     final target = box == null ? null : _animator.offsetOf(drag.id);
     // Settle toward the dragged slot's content position: the layout has already
@@ -622,7 +767,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     final drag = _drag;
     if (drag == null) return;
 
-    _autoScroller?.stopAutoScroll();
+    _autoScrollVelocity = 0;
     _animator.lift.retarget(0, widget.style.dropSpring);
     if (notify) drag.onCanceled?.call(drag.item);
 
@@ -632,12 +777,16 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     // removed item has no slot or widget to animate, so drop it immediately.
     final home = _itemsById.containsKey(drag.id) ? _animator.offsetOf(drag.id) : null;
     if (home != null) {
+      // Keep the overlay proxy alive so it animates home; _finishSettle removes
+      // it once the springs rest.
       _animator.settleDragged(home);
       setState(() => drag.phase = DragPhase.settling);
       _startTicker();
       return;
     }
 
+    // Removed item: nothing to settle, so drop the proxy at once.
+    _disposeDragProxy();
     _animator.draggedId = null;
     _drag = null;
     _baseIndexCache = null; // dragged id rejoins the base order
@@ -646,6 +795,9 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
   }
 
   void _finishSettle() {
+    // Remove the proxy before the rebuild so the real in-list child returns in
+    // the same frame — no gap where the item is neither in the list nor overlay.
+    _disposeDragProxy();
     _animator.draggedId = null;
     _drag = null;
     _baseIndexCache = null; // dragged id rejoins the base order
@@ -677,6 +829,7 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
       spacing: widget.spacing,
       style: widget.style,
       applyEffects: widget.transitionBuilder == null,
+      dragProxyActive: _proxyActive,
       composite: _composite,
       totalItems: _itemsById.length,
       delegate: SliverChildBuilderDelegate(
@@ -712,6 +865,19 @@ class _SliverFluidListState<T> extends State<SliverFluidList<T>> with SingleTick
     if (item == null) return null;
     final isDragged = _drag?.id == id;
 
+    // While the overlay proxy renders the lifted item, the in-list child is a
+    // same-size placeholder so layout, item sizes, and the insertion resolver
+    // are unchanged while the item's content (and its State) exists only once —
+    // in the overlay. Same key/wrapper so the element updates in place.
+    if (isDragged && _proxyActive) {
+      return _SliverListChild(
+        key: ValueKey(('item', id)),
+        id: id,
+        role: ListChildRole.item,
+        child: SizedBox.fromSize(size: _drag!.itemSize),
+      );
+    }
+
     var child = widget.itemBuilder(context, item);
     if (isDragged && widget.liftedBuilder != null) {
       child = widget.liftedBuilder!(context, item, _liftAnimation, child);
@@ -741,6 +907,7 @@ class _FluidListAdaptor extends SliverMultiBoxAdaptorWidget {
     required this.spacing,
     required this.style,
     required this.applyEffects,
+    required this.dragProxyActive,
     required this.composite,
     required this.totalItems,
     super.key,
@@ -750,6 +917,7 @@ class _FluidListAdaptor extends SliverMultiBoxAdaptorWidget {
   final double spacing;
   final FluidListStyle style;
   final bool applyEffects;
+  final bool dragProxyActive;
   final List<_CompositeEntry> composite;
   final int totalItems;
 
@@ -763,6 +931,7 @@ class _FluidListAdaptor extends SliverMultiBoxAdaptorWidget {
     spacing: spacing,
     style: style,
     applyEffects: applyEffects,
+    dragProxyActive: dragProxyActive,
   );
 
   @override
@@ -771,7 +940,8 @@ class _FluidListAdaptor extends SliverMultiBoxAdaptorWidget {
       ..animator = animator
       ..spacing = spacing
       ..style = style
-      ..applyEffects = applyEffects;
+      ..applyEffects = applyEffects
+      ..dragProxyActive = dragProxyActive;
   }
 
   /// Estimates the scroll extent counting only items, so zero-extent ghosts do

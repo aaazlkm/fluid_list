@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:fluid_list/fluid_list.dart';
 import 'package:fluid_list/src/sliver/render_sliver_fluid_list.dart';
 import 'package:flutter/material.dart';
@@ -22,6 +24,7 @@ class _Harness extends StatefulWidget {
     this.echoReorder = false,
     this.lifted = false,
     this.reorderEnabled = true,
+    this.autoScroll,
     this.transitionBuilder,
     this.onReorderStarted,
     this.onReorderFinished,
@@ -36,6 +39,7 @@ class _Harness extends StatefulWidget {
   final bool echoReorder;
   final bool lifted;
   final bool reorderEnabled;
+  final FluidListAutoScrollConfig? autoScroll;
   final FluidListTransitionBuilder? transitionBuilder;
   final void Function(_Item)? onReorderStarted;
   final void Function(FluidListReorderResult<_Item>)? onReorderFinished;
@@ -90,6 +94,7 @@ class _HarnessState extends State<_Harness> {
             ? FluidListReorderEnabled(
                 dragMode: widget.dragMode,
                 dragStartDelay: _dragDelay,
+                autoScroll: widget.autoScroll ?? const FluidListAutoScrollConfig(),
                 onReorderStarted: widget.onReorderStarted,
                 onReorderCanceled: widget.onReorderCanceled,
                 onReorderFinished: (result) {
@@ -556,6 +561,375 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(find.text('b'), findsNothing);
+    });
+  });
+
+  group('autoscroll', () {
+    /// Lifts item 'a' and holds it [holdAt] with the pointer never moving again,
+    /// so only the autoscroll loop can advance the list.
+    Future<(TestGesture, ScrollPosition)> holdAtEdge(
+      WidgetTester tester,
+      Offset holdAt, {
+      FluidListAutoScrollConfig? autoScroll,
+    }) async {
+      await tester.pumpWidget(
+        _Harness(
+          items: [for (var i = 0; i < 60; i++) _Item(i == 0 ? 'a' : '$i', 100)],
+          autoScroll: autoScroll,
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      final gesture = await tester.startGesture(tester.getCenter(find.text('a')));
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      await gesture.moveTo(holdAt);
+      await tester.pump(const Duration(milliseconds: 16));
+
+      return (gesture, tester.state<ScrollableState>(find.byType(Scrollable)).position);
+    }
+
+    testWidgets('keeps scrolling while the finger holds still at the edge', (tester) async {
+      // Autoscroll is driven from the drag ticker, which fires every frame and
+      // recomputes the edge overshoot from the finger-pinned item — so holding
+      // the finger still keeps scrolling, with no stored rect that could go
+      // stale and stall the loop.
+      final (gesture, position) = await holdAtEdge(tester, const Offset(400, 580));
+
+      final samples = <double>[];
+      for (var i = 0; i < 12; i++) {
+        await tester.pump(const Duration(milliseconds: 40));
+        samples.add(position.pixels);
+      }
+
+      expect(samples.first, greaterThan(0), reason: 'autoscroll never started');
+      // Strictly increasing: velocity stays positive once engaged, so any stall
+      // would repeat an offset.
+      for (var i = 1; i < samples.length; i++) {
+        expect(samples[i], greaterThan(samples[i - 1]), reason: 'autoscroll stalled at step $i: $samples');
+      }
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('eases in: accelerates instead of jumping to full speed', (tester) async {
+      final (gesture, position) = await holdAtEdge(tester, const Offset(400, 580));
+
+      // One tick per pump (dt clamped to 1/30 s), so the per-step deltas are
+      // deterministic. The default ramp is long relative to this window, so the
+      // first several steps are still speeding up toward the depth target.
+      final samples = <double>[];
+      for (var i = 0; i < 8; i++) {
+        await tester.pump(const Duration(milliseconds: 40));
+        samples.add(position.pixels);
+      }
+      final deltas = [for (var i = 1; i < samples.length; i++) samples[i] - samples[i - 1]];
+
+      // Each early step travels farther than the last — acceleration, not a
+      // constant speed. (The pre-ramp implementation moved a fixed amount each
+      // step, so these deltas would be equal and the test would fail.)
+      for (var i = 1; i <= 4; i++) {
+        expect(deltas[i], greaterThan(deltas[i - 1]), reason: 'not accelerating at step $i: $deltas');
+      }
+      expect(deltas.first, lessThan(deltas[4]), reason: 'no ramp: $deltas');
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('within the trigger zone, scrolls faster nearer the edge', (tester) async {
+      // A wide trigger zone (200px) with a short ramp so both holds — one just
+      // inside the zone, one near the edge — saturate quickly at their position's
+      // speed. Items are 100px grabbed at centre, so itemEnd ≈ holdY + 50.
+      const config = FluidListAutoScrollConfig(startVelocity: 60, maxVelocity: 1500, edgeTriggerDistance: 200, rampDuration: Duration(milliseconds: 200));
+
+      Future<double> saturatedStep(Offset holdAt) async {
+        // Unmount any previous run so this one starts from a fresh scroll offset
+        // (a keyless _Harness would otherwise reuse the prior scroll position).
+        await tester.pumpWidget(const SizedBox());
+        final (gesture, position) = await holdAtEdge(tester, holdAt, autoScroll: config);
+        for (var i = 0; i < 20; i++) {
+          await tester.pump(const Duration(milliseconds: 40));
+        }
+        final before = position.pixels;
+        await tester.pump(const Duration(milliseconds: 40));
+        final step = position.pixels - before;
+        await gesture.up();
+        await tester.pumpAndSettle();
+        return step;
+      }
+
+      final farFromEdge = await saturatedStep(const Offset(400, 360)); // itemEnd ≈ 410, ~190px from edge
+      final nearEdge = await saturatedStep(const Offset(400, 540)); // itemEnd ≈ 590, ~10px from edge
+
+      // Nearer the edge scrolls markedly faster. (A position-independent model
+      // would make these equal.)
+      expect(nearEdge, greaterThan(farFromEdge * 2), reason: 'proximity did not increase speed: far=$farFromEdge near=$nearEdge');
+    });
+
+    testWidgets('respects a configured max velocity', (tester) async {
+      const maxVelocity = 200.0;
+      // The y=580 hold is past the edge (itemEnd ≈ 630 > viewport bottom), so the
+      // target is the true max.
+      final (gesture, position) = await holdAtEdge(tester, const Offset(400, 580), autoScroll: const FluidListAutoScrollConfig(maxVelocity: maxVelocity));
+
+      // Pump long enough for the ramp to saturate, then check no step ever
+      // exceeded the cap. One tick per pump (dt clamped to 1/30 s), so a step at
+      // the cap is maxVelocity / 30.
+      var previous = position.pixels;
+      var maxStep = 0.0;
+      for (var i = 0; i < 100; i++) {
+        await tester.pump(const Duration(milliseconds: 40));
+        maxStep = math.max(maxStep, position.pixels - previous);
+        previous = position.pixels;
+      }
+
+      const cappedStep = maxVelocity / 30;
+      // No step ever exceeds the configured cap (with a little slack), and it
+      // actually reaches it — far below the ~33px the default 1000 px/s max gives.
+      expect(maxStep, lessThan(cappedStep + 1), reason: 'exceeded the configured max: $maxStep');
+      expect(maxStep, greaterThan(cappedStep - 1), reason: 'never reached the configured max: $maxStep');
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('respects a configured start velocity', (tester) async {
+      // A high start velocity means the very first autoscroll step is already
+      // fast, rather than crawling up from a gentle floor.
+      const startVelocity = 600.0;
+      final (gesture, position) = await holdAtEdge(tester, const Offset(400, 580), autoScroll: const FluidListAutoScrollConfig(startVelocity: startVelocity));
+
+      final before = position.pixels;
+      await tester.pump(const Duration(milliseconds: 40));
+      final firstStep = position.pixels - before;
+
+      // The first step is near start / 30 — well above the ~3px a default 90 px/s
+      // start would give.
+      expect(firstStep, greaterThan(startVelocity / 30 - 1), reason: 'first step slower than the start velocity: $firstStep');
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('respects the ramp duration — zero tracks the target immediately', (tester) async {
+      // Zero ramp with the y=580 hold past the edge (target = max) so the very
+      // first step is already at full speed, with no ease-in.
+      const config = FluidListAutoScrollConfig(maxVelocity: 1000, rampDuration: Duration.zero);
+      final (gesture, position) = await holdAtEdge(tester, const Offset(400, 580), autoScroll: config);
+
+      final before = position.pixels;
+      await tester.pump(const Duration(milliseconds: 40));
+      final firstStep = position.pixels - before;
+
+      // Already at 1000 px/s → ~33px per 1/30 s tick, not a gentle ramped first step.
+      expect(firstStep, greaterThan(1000 / 30 - 2), reason: 'did not jump to the depth target with a zero ramp: $firstStep');
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('stops autoscrolling once the item is dropped', (tester) async {
+      final (gesture, position) = await holdAtEdge(tester, const Offset(400, 580));
+
+      await tester.pump(const Duration(milliseconds: 40));
+      expect(position.pixels, greaterThan(0));
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      // Re-arming on scroll must not outlive the drag.
+      final settled = position.pixels;
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(position.pixels, settled);
+    });
+
+    testWidgets('does not autoscroll away from an item held mid-viewport', (tester) async {
+      final (gesture, position) = await holdAtEdge(tester, const Offset(400, 300));
+
+      await tester.pump(const Duration(milliseconds: 200));
+      expect(position.pixels, 0);
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+  });
+
+  group('overlay drag proxy', () {
+    /// Lifts [id] and leaves the finger down; returns the live gesture.
+    Future<TestGesture> lift(WidgetTester tester, String id) async {
+      final gesture = await tester.startGesture(tester.getCenter(find.text(id)));
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      await gesture.moveBy(const Offset(0, 8));
+      await tester.pump();
+      return gesture;
+    }
+
+    /// The lifted item lives in the overlay, not in the scroll view.
+    Finder inScrollView(String id) => find.descendant(of: find.byType(CustomScrollView), matching: find.text(id));
+
+    testWidgets('renders the lifted item above an earlier sliver', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: CustomScrollView(
+              slivers: [
+                SliverToBoxAdapter(
+                  child: Container(key: const ValueKey('header'), height: 100, color: const Color(0xFF223344)),
+                ),
+                SliverFluidList<_Item>(
+                  items: const [_Item('a', 40), _Item('b', 40), _Item('c', 40)],
+                  idOf: (item) => item.id,
+                  itemBuilder: (context, item) => SizedBox(height: item.extent, child: Text(item.id)),
+                  reorder: FluidListReorderEnabled(dragStartDelay: _dragDelay, onReorderFinished: (_) {}),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      // 'a' sits just below the 100px header. Lift it and drag up over the header.
+      final gesture = await tester.startGesture(tester.getCenter(find.text('a')));
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      await gesture.moveBy(const Offset(0, -90));
+      await tester.pump();
+
+      // The lifted copy floats in the overlay, not inside the scroll view (an
+      // in-sliver child could not paint above the earlier header sliver).
+      expect(find.text('a'), findsOneWidget);
+      expect(inScrollView('a'), findsNothing);
+
+      // And it overlaps the header it was dragged over.
+      final proxyRect = tester.getRect(find.text('a'));
+      final headerRect = tester.getRect(find.byKey(const ValueKey('header')));
+      expect(proxyRect.top, lessThan(headerRect.bottom));
+      expect(proxyRect.bottom, greaterThan(headerRect.top));
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('swaps the in-list child for a placeholder while lifted, and restores it on drop', (tester) async {
+      await tester.pumpWidget(const _Harness(items: [_Item('a', 40), _Item('b', 40)]));
+      await tester.pump();
+
+      final gesture = await lift(tester, 'a');
+      expect(find.text('a'), findsOneWidget, reason: 'exactly one copy — the proxy');
+      expect(inScrollView('a'), findsNothing, reason: 'the in-list child is a bare placeholder');
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(inScrollView('a'), findsOneWidget, reason: 'back in the list, proxy gone');
+    });
+
+    testWidgets('the proxy tracks the pointer', (tester) async {
+      await tester.pumpWidget(const _Harness(items: [_Item('a', 40), _Item('b', 40), _Item('c', 40)]));
+      await tester.pump();
+
+      final gesture = await lift(tester, 'a');
+      final before = tester.getTopLeft(find.text('a'));
+      await gesture.moveBy(const Offset(0, 40));
+      await tester.pump();
+      final after = tester.getTopLeft(find.text('a'));
+
+      // The item is pinned to the finger, so the proxy moves with it exactly.
+      expect(after.dy - before.dy, moreOrLessEquals(40, epsilon: 1));
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('the lifted builder decorates the overlay proxy', (tester) async {
+      await tester.pumpWidget(const _Harness(items: [_Item('a', 40), _Item('b', 40)], lifted: true));
+      await tester.pump();
+
+      final gesture = await lift(tester, 'a');
+      // The DecoratedBox from the liftedBuilder wraps the proxy's copy.
+      expect(find.ancestor(of: find.text('a'), matching: find.byType(DecoratedBox)), findsOneWidget);
+
+      await gesture.up();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('removing the held item mid-drag tears down the proxy and cancels', (tester) async {
+      var canceled = 0;
+      Widget harness(List<_Item> items) => _Harness(items: items, onReorderCanceled: (_) => canceled++);
+
+      await tester.pumpWidget(harness(const [_Item('a', 40), _Item('b', 40), _Item('c', 40)]));
+      await tester.pump();
+
+      final gesture = await lift(tester, 'a');
+      expect(find.text('a'), findsOneWidget);
+
+      // 'a' leaves the data while held.
+      await tester.pumpWidget(harness(const [_Item('b', 40), _Item('c', 40)]));
+      await tester.pumpAndSettle();
+
+      expect(find.text('a'), findsNothing, reason: 'proxy removed with the item');
+      expect(canceled, 1);
+
+      await gesture.up();
+    });
+
+    testWidgets('reorders a horizontal list through the proxy', (tester) async {
+      FluidListReorderResult<_Item>? result;
+      await tester.pumpWidget(
+        _Harness(
+          axis: Axis.horizontal,
+          items: const [_Item('a', 50), _Item('b', 60), _Item('c', 40)],
+          onReorderFinished: (r) => result = r,
+        ),
+      );
+      await tester.pump();
+
+      final from = tester.getCenter(find.text('a'));
+      await dragFromTo(tester, from, from + const Offset(120, 0));
+
+      expect(result?.item.id, 'a');
+      expect(result!.toIndex, greaterThan(0));
+    });
+
+    testWidgets('falls back to in-sliver painting without an Overlay', (tester) async {
+      var finished = 0;
+      Widget tree(List<_Item> items) => Directionality(
+        textDirection: TextDirection.ltr,
+        child: MediaQuery(
+          data: const MediaQueryData(),
+          child: CustomScrollView(
+            slivers: [
+              SliverFluidList<_Item>(
+                items: items,
+                idOf: (item) => item.id,
+                itemBuilder: (context, item) => SizedBox(height: item.extent, child: Text(item.id)),
+                reorder: FluidListReorderEnabled(dragStartDelay: _dragDelay, onReorderFinished: (_) => finished++),
+              ),
+            ],
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(tree(const [_Item('a', 40), _Item('b', 40), _Item('c', 40)]));
+      await tester.pump();
+
+      final from = tester.getCenter(find.text('a'));
+      final gesture = await tester.startGesture(from);
+      await tester.pump(_dragDelay + const Duration(milliseconds: 50));
+      await gesture.moveBy(const Offset(0, 30));
+      await tester.pump();
+
+      // No overlay in scope → no proxy; the lifted item stays in the scroll view.
+      expect(inScrollView('a'), findsOneWidget);
+
+      // And a full drag still reorders without throwing.
+      for (var step = 1; step <= 6; step++) {
+        await gesture.moveTo(from + Offset(0, 90.0 * step / 6));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(finished, 1);
     });
   });
 }

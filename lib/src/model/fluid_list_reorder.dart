@@ -1,9 +1,7 @@
+import 'package:fluid_list/src/model/fluid_list_auto_scroll.dart';
 import 'package:fluid_list/src/model/fluid_list_reorder_result.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart' show kLongPressTimeout;
-
-/// Matches `SliverReorderableList`'s autoscroll speed.
-const double kFluidListDefaultAutoScrollVelocityScalar = 50;
 
 /// How a reorder drag is initiated.
 enum FluidListDragMode {
@@ -36,7 +34,7 @@ sealed class FluidListReorder<T> {
   const factory FluidListReorder.enabled({
     FluidListDragMode dragMode,
     Duration dragStartDelay,
-    double autoScrollVelocityScalar,
+    FluidListAutoScrollConfig autoScroll,
     void Function(T item)? onReorderStarted,
     void Function(FluidListReorderResult<T> result)? onReorderFinished,
     void Function(T item)? onReorderCanceled,
@@ -53,7 +51,7 @@ final class FluidListReorderEnabled<T> extends FluidListReorder<T> {
   const FluidListReorderEnabled({
     this.dragMode = FluidListDragMode.item,
     this.dragStartDelay = kLongPressTimeout,
-    this.autoScrollVelocityScalar = kFluidListDefaultAutoScrollVelocityScalar,
+    this.autoScroll = const FluidListAutoScrollConfig(),
     this.onReorderStarted,
     this.onReorderFinished,
     this.onReorderCanceled,
@@ -66,8 +64,9 @@ final class FluidListReorderEnabled<T> extends FluidListReorder<T> {
   /// applies to [FluidListDragMode.item].
   final Duration dragStartDelay;
 
-  /// Speed of the autoscroll when the held item nears a viewport edge.
-  final double autoScrollVelocityScalar;
+  /// How the list auto-scrolls when the held item nears a viewport edge — its
+  /// speeds, distance sensitivity, and acceleration. See [FluidListAutoScrollConfig].
+  final FluidListAutoScrollConfig autoScroll;
 
   final void Function(T item)? onReorderStarted;
 
